@@ -3,7 +3,7 @@
 using LinearAlgebra, Plots, QuantEcon, Parameters, Roots
 
 markov_stationary = function(P; niter=1000, tol=1e-10)
-    # get stationary distriubiton for markov
+    # get stationary distribution for markov
     # transition matrix P
     n = size(P, 1)
     dist0 = ones(n)   
@@ -17,12 +17,14 @@ markov_stationary = function(P; niter=1000, tol=1e-10)
         iter += 1
     end
 
+    println("Error for Markov Stationarity: $error")
+
     return dist0
 end
 
 entrant_dist = function(params)
     # whats the inital draw dist for entrants
-    # I assue its teh stationary dist of z 
+    # I assume its the stationary dist of z 
     
     dist = markov_stationary(params.zP)
 
@@ -38,12 +40,12 @@ params = @with_kw (
     zmc = tauchen(n_z, ρ, σ_ϵ, logzbar, 4),
     zP = zmc.p,
     zgrid = zmc.state_values,
-    kₑ=1.0,
+    kₑ=40.0,
     α=0.66,
     n_l=500,
     ngrid = range(0.1, 500.0, n_l),
     k=20.0,
-    Dbar=100
+    Dbar=100.0
 )
 
 Π = function(logz, n, p, w=1; α=0.66, k=20)
@@ -60,8 +62,6 @@ T! = function(V, pol, params, prices)
     # Bellman operator
     @unpack β, n_z, ρ, σ_ϵ, logzbar, zmc, zP, zgrid, kₑ, α, n_l, ngrid, k, Dbar = params
     p, w = prices
-
-    # Bellman Operator
     
     for zidx in 1:n_z
         z = zgrid[zidx] 
@@ -69,11 +69,12 @@ T! = function(V, pol, params, prices)
         maxsofar = -Inf
         for nidx in 1:n_l
             n = ngrid[nidx]
-            u = Π(z,n,p,w; α=α, k=k) + β * max(0, zP[zidx, :] ⋅ V)
+            u = Π(z,n,p,w; α=α, k=k) + β * max(0.0, zP[zidx, :] ⋅ V)
 
             if u >= maxsofar
                 V[zidx] = u
                 pol[zidx] = nidx
+                maxsofar = u
             end
         end
     end
@@ -123,17 +124,18 @@ vfi = function(prices, params; niter=1000, tol=1e-10)
     return v0, pol0, zˢ, error, iter
 end
 
-
 v, pol, zˢ, e, i = vfi((5, 1), params())
+
 condmarkov = function(params, zˢ)
     # what edmond calls ϕ
     ϕ = copy(params.zP)
     ϕ[1:zˢ, :] .= 0.0
+    ϕ = ϕ'
     return ϕ
 
 end
 
-getge = function(params, niter=1000, tol=1e-10, learningparam=0.9)
+getge = function(params, niter=1000, tol=1e-10)
     # We normalize w and need to guess p
     # leaningparam is how much p updates each cycle
 
@@ -174,14 +176,28 @@ parameters = params()
 p, v, pol, zˢ, μ, m = getge(parameters)
 
 # testing if error is low
-eqerror = parameters.β * V' * entrant_dist(parameters) - parameters.kₑ
+eqerror = parameters.β * v' * entrant_dist(parameters) - parameters.kₑ
 println("Equlibrium error: $eqerror")
 gooderror = firmoutput(pol, parameters) ⋅ μ - parameters.Dbar/p
 println("Goods market eq error: $gooderror")
 
 # plots
+# Value function
 plot(exp.(parameters.zgrid), v)
-plot(exp.(parameters.zgrid), μ )
+
+# distributions
+empl_dist = pol .* μ
+empl_dist = empl_dist/sum(empl_dist)
+empl_dist = empl_dist/sum(empl_dist)
+fmatrix = markov_stationary(parameters.zP)
+fmatrix = fmatrix/sum(fmatrix)
+μ_rescaled = μ/sum(μ)
+
+
+plot(exp.(parameters.zgrid), μ_rescaled, label="Distribution of Firms", linewidth = 2)
+plot!(exp.(parameters.zgrid), empl_dist, label = "Employment Distribution", linewidth=2)
+plot!(exp.(parameters.zgrid), fmatrix, 
+      label = "Stationary transition matrix", linewidth=2)
 
 
 

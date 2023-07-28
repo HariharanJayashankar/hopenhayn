@@ -2,6 +2,7 @@
 
 using LinearAlgebra, Plots, QuantEcon, Parameters, Roots
 
+
 markov_stationary = function(P; niter=1000, tol=1e-10)
     # get stationary distribution for markov
     # transition matrix P
@@ -33,7 +34,7 @@ end
 
 params = @with_kw (
     β=0.8,
-    n_z = 101,
+    n_z = 100,
     ρ = 0.9,
     σ_ϵ = 0.2,
     logzbar = (1-ρ) *  1.4,
@@ -43,40 +44,35 @@ params = @with_kw (
     kₑ=40.0,
     α=0.66,
     n_l=500,
-    ngrid = range(0.1, 500.0, n_l),
+    ngrid = 10 .^ range(log10(1e-6), log10(n_l), n_l),
     k=20.0,
     Dbar=100.0
 )
 
-Π = function(logz, n, p, w=1; α=0.66, k=20)
+Π = function(logz, n, p, w=1.0; α=0.66, k=20.0)
     # static profit
     
     z = exp(logz)
     
-    profit = p*z*(n^α) - w*n - k
+    profit = z*p*(n^α) - w*n - k
     return profit
 end
 
 T! = function(V, pol, params, prices)
 
     # Bellman operator
+    
     @unpack β, n_z, ρ, σ_ϵ, logzbar, zmc, zP, zgrid, kₑ, α, n_l, ngrid, k, Dbar = params
     p, w = prices
     
     for zidx in 1:n_z
         z = zgrid[zidx] 
 
-        maxsofar = -Inf
-        for nidx in 1:n_l
-            n = ngrid[nidx]
-            u = Π(z,n,p,w; α=α, k=k) + β * max(0.0, zP[zidx, :] ⋅ V)
+        # creating a profit func to broadcast only over n
+        Π_n(n) = Π(z, n, p, w; α=α, k=k)
+        uvec = Π_n.(ngrid) .+ β * max(0.0, zP[zidx, :] ⋅ V)
+        V[zidx], pol[zidx] = findmax(uvec)
 
-            if u >= maxsofar
-                V[zidx] = u
-                pol[zidx] = nidx
-                maxsofar = u
-            end
-        end
     end
 end
 
@@ -100,7 +96,7 @@ vfi = function(prices, params; niter=1000, tol=1e-10)
     # value function iteration
 
     v0 = zeros(params.n_z)
-    pol0 = zero(v0)
+    pol0 = zeros(Int64, params.n_z)
     error = 20
     iter=0
 
@@ -140,8 +136,6 @@ getge = function(params, niter=1000, tol=1e-10)
     # leaningparam is how much p updates each cycle
 
     # First stage : price
-    error = 20
-    iter = 0
     V = zeros(params.n_z)
     pol = zero(V)
     g = entrant_dist(params)
@@ -164,10 +158,10 @@ getge = function(params, niter=1000, tol=1e-10)
     y = firmoutput(pol, params)
 
     ϕ = condmarkov(params, zˢ)
-    μ_1 = 1.0 * (I - ϕ)^(-1) * g
+    μ_1 = (I - ϕ)^(-1) * g
     D = params.Dbar/p
     m = D/(y' * μ_1)
-    μ = m * (I - ϕ)^(-1) * g
+    μ = m * μ_1
     
     return p, v, pol, zˢ, μ, m  
 end
@@ -186,8 +180,7 @@ println("Goods market eq error: $gooderror")
 plot(exp.(parameters.zgrid), v)
 
 # distributions
-empl_dist = pol .* μ
-empl_dist = empl_dist/sum(empl_dist)
+empl_dist = parameters.ngrid[pol] .* μ
 empl_dist = empl_dist/sum(empl_dist)
 fmatrix = markov_stationary(parameters.zP)
 fmatrix = fmatrix/sum(fmatrix)

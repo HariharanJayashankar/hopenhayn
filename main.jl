@@ -1,13 +1,13 @@
 # Basic Hopenhayn problem
 
 using LinearAlgebra, Plots, QuantEcon, Parameters, Roots
-
+gr()
 
 markov_stationary = function(P; niter=1000, tol=1e-10)
     # get stationary distribution for markov
     # transition matrix P
     n = size(P, 1)
-    dist0 = ones(n)   
+    dist0 = ones(n) ./ n   
     iter = 0
     error = 20
 
@@ -34,7 +34,7 @@ end
 
 params = @with_kw (
     β=0.8,
-    n_z = 100,
+    n_z = 500,
     ρ = 0.9,
     σ_ϵ = 0.2,
     logzbar = (1-ρ) *  1.4,
@@ -44,7 +44,7 @@ params = @with_kw (
     kₑ=40.0,
     α=0.66,
     n_l=500,
-    ngrid = 10 .^ range(log10(1e-6), log10(n_l), n_l),
+    ngrid = range(0, n_l, n_l),
     k=20.0,
     Dbar=100.0
 )
@@ -65,13 +65,13 @@ T! = function(V, pol, params, prices)
     @unpack β, n_z, ρ, σ_ϵ, logzbar, zmc, zP, zgrid, kₑ, α, n_l, ngrid, k, Dbar = params
     p, w = prices
     
-    for zidx in 1:n_z
+    Threads.@threads for zidx = 1:n_z
         z = zgrid[zidx] 
 
         # creating a profit func to broadcast only over n
-        Π_n(n) = Π(z, n, p, w; α=α, k=k)
+        Π_n(x) = Π(z, x, p, w; α=α, k=k)
         uvec = Π_n.(ngrid) .+ β * max(0.0, zP[zidx, :] ⋅ V)
-        V[zidx], pol[zidx] = findmax(uvec)
+        @inbounds V[zidx], pol[zidx] = findmax(uvec)
 
     end
 end
@@ -92,24 +92,22 @@ exitthresh = function(v, params)
     return zidx
 end
 
-vfi = function(prices, params; niter=1000, tol=1e-10)
+vfi = function(prices, params; niter=1000, tol=1e-5)
     # value function iteration
 
-    v0 = zeros(params.n_z)
-    pol0 = zeros(Int64, params.n_z)
-    error = 20
+    v0 = ones(params.n_z)
+    pol = zeros(Int64, params.n_z)
+    error = 20.0
     iter=0
 
     while error > tol && iter < niter
         v1 = copy(v0)
-        pol1 = copy(pol0)
-        T!(v1, pol1, params, prices) 
+        T!(v1, pol, params, prices) 
 
         error = maximum(abs.(v1 - v0))
         iter += 1
 
         v0 = v1
-        pol0 = pol1
 
         if iter % 100 == 0
             println("Iteration: $iter, Error: $error")
@@ -117,7 +115,7 @@ vfi = function(prices, params; niter=1000, tol=1e-10)
     end
 
     zˢ = exitthresh(v0, params)
-    return v0, pol0, zˢ, error, iter
+    return v0, pol, zˢ, error, iter
 end
 
 v, pol, zˢ, e, i = vfi((5, 1), params())
@@ -131,19 +129,18 @@ condmarkov = function(params, zˢ)
 
 end
 
-getge = function(params, niter=1000, tol=1e-10)
+getge = function(params, niter=1000, tol=1e-5)
     # We normalize w and need to guess p
     # leaningparam is how much p updates each cycle
 
     # First stage : price
-    V = zeros(params.n_z)
-    pol = zero(V)
     g = entrant_dist(params)
+    g = g / sum(g)
 
     freeentry = function(p)
 
         prices = (p, 1)
-        V, pol, zs, e1, i1 = vfi(prices, params)
+        V, pol, zs, e1, i1 = vfi(prices, params, niter=niter, tol=tol)
         kₑ_test = params.β * V' * g 
         error = kₑ_test - params.kₑ
         return error
@@ -154,8 +151,9 @@ getge = function(params, niter=1000, tol=1e-10)
 
     # second stage: guessing m
     prices = (p, 1)
-    v, pol, zˢ, error, iter = vfi(prices,params)
-    y = firmoutput(pol, params)
+    v, pol, zˢ, error, iter = vfi(prices,params, niter=niter, tol=tol)
+    optimal_n = params.ngrid[pol]
+    y = firmoutput(optimal_n, params)
 
     ϕ = condmarkov(params, zˢ)
     μ_1 = (I - ϕ)^(-1) * g
@@ -168,11 +166,12 @@ end
 
 parameters = params()
 p, v, pol, zˢ, μ, m = getge(parameters)
+optimal_n = parameters.ngrid[pol]
 
 # testing if error is low
 eqerror = parameters.β * v' * entrant_dist(parameters) - parameters.kₑ
 println("Equlibrium error: $eqerror")
-gooderror = firmoutput(pol, parameters) ⋅ μ - parameters.Dbar/p
+gooderror = firmoutput(optimal_n, parameters) ⋅ μ - parameters.Dbar/p
 println("Goods market eq error: $gooderror")
 
 # plots
@@ -180,17 +179,32 @@ println("Goods market eq error: $gooderror")
 plot(exp.(parameters.zgrid), v)
 
 # distributions
-empl_dist = parameters.ngrid[pol] .* μ
+empl_dist = optimal_n .* μ
 empl_dist = empl_dist/sum(empl_dist)
 fmatrix = markov_stationary(parameters.zP)
 fmatrix = fmatrix/sum(fmatrix)
 μ_rescaled = μ/sum(μ)
 
 
-plot(exp.(parameters.zgrid), μ_rescaled, label="Distribution of Firms", linewidth = 2)
-plot!(exp.(parameters.zgrid), empl_dist, label = "Employment Distribution", linewidth=2)
-plot!(exp.(parameters.zgrid), fmatrix, 
-      label = "Stationary transition matrix", linewidth=2)
+plot(
+     exp.(parameters.zgrid),
+     μ_rescaled,
+     label="Distribution of Firms",
+     linewidth = 2
+    )
+plot!(
+      exp.(parameters.zgrid),
+      empl_dist,
+      label = "Employment Distribution",
+      linewidth=2
+     )
+plot!(
+      exp.(parameters.zgrid),
+      fmatrix,
+      label = "Stationary transition matrix",
+      linewidth=2
+     )
 
+savefig("distributions.pdf")
 
 
